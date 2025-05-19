@@ -4,16 +4,17 @@ import (
     "fmt"
     "net/http"
     "regexp"
+	"log"
 )
 
-// ChronoProxy holds offsets, timeframes & an HTTP client.
+// ChronoProxy holds our offsets, labels and HTTP client.
 type ChronoProxy struct {
     offsets    []int64
     timeframes []string
     client     *http.Client
 }
 
-// NewChronoProxy sets up the windows and labels.
+// NewChronoProxy initializes the 0,7,14,21,28-day windows.
 func NewChronoProxy() *ChronoProxy {
     return &ChronoProxy{
         offsets: []int64{
@@ -28,7 +29,7 @@ func NewChronoProxy() *ChronoProxy {
     }
 }
 
-// ServeHTTP splits /<host>_<port>/ then routes.
+// ServeHTTP strips off /<host>_<port>/ and dispatches to handlers.
 func (p *ChronoProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     re := regexp.MustCompile(`^/([^_/]+)_(\d+)(/.*)?$`)
     m := re.FindStringSubmatch(r.URL.Path)
@@ -59,7 +60,9 @@ func (p *ChronoProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         p.handleLabelValues(w, r, upstream, suffix, label)
 
     default:
-        // catch-all proxy
+		if DebugMode {
+			log.Printf("Forwarding Unknown request: %s %s\n", r.Method, r.URL.Path)
+		}
         forward(w, r, p.client, upstream+suffix)
     }
 }
