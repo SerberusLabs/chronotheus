@@ -196,9 +196,11 @@ type rangeRes struct {
 func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command string) []map[string]interface{} {
     var all []map[string]interface{}
     for i, offset := range p.offsets {
+        
         if DebugMode {
             log.Printf("fetchWindowsRange: %d offset %d", i, offset)
         }
+
         tf := p.timeframes[i]
         start := parseTime(params.Get("start")) - offset
         end := parseTime(params.Get("end")) - offset
@@ -213,14 +215,14 @@ func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command stri
         body, _ := io.ReadAll(resp.Body)
         resp.Body.Close()
 
+        if DebugMode {
+            log.Printf("fetchWindowsRange offset- Got Data: %s", u)
+        }
+
         var jr rangeRes
         if err := json.Unmarshal(body, &jr); err != nil {
             continue
         }
-        if DebugMode {
-            log.Printf("fetchWindowsRange: %d series", len(jr.Data.Result))
-        }
-        if len(jr.Data.Result) == 0 {
         for _, s := range jr.Data.Result {
             shifted := make([]interface{}, len(s.Values))
             for j, pair := range s.Values {
@@ -239,19 +241,17 @@ func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command stri
                 "values": shifted,
             })
         }
-            if DebugMode {  
-                log.Printf("fetchWindowsRange %d offset %d loop completed: %d series", i, offset, len(all))
-            }
-        }
+
+        if DebugMode {
+            log.Printf("fetchWindowsRange offset loop timeshifted")
+        }   
+
     }
-    
     if DebugMode {
-        log.Printf("fetchWindowsRange outer completed")
+        log.Printf("fetchWindowsRange offset loop completed: ", len(all))
     }
-    
     return all
 }
-
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────────
 
