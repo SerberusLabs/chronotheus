@@ -12,11 +12,12 @@ import (
     "strconv"
     "strings"
     "time"
+	"log"
 )
 
-// ─── PARAM PARSING & STRIPPING ────────────────────────────────────────────────
+// ─── PARAMS & STRIPPING ─────────────────────────────────────────────────────────-
 
-// parseClientParams merges GET + JSON-POST + form-POST into url.Values
+// parseClientParams merges GET and POST parameters into url.Values
 func parseClientParams(r *http.Request) url.Values {
     vals := url.Values{}
     if r.Method == "POST" {
@@ -53,22 +54,35 @@ func parseClientParams(r *http.Request) url.Values {
     return vals
 }
 
-// stripLabelFromParam removes ,?label="value" and cleans up stray commas/braces
+// detectSelectors finds chrono_timeframe and _command labels in inline `query`
+func detectSelectors(vals url.Values) (string, string) {
+    q := vals.Get("query")
+    tf, cmd := "", ""
+    if m := regexp.MustCompile(`\\bchrono_timeframe="([^"]+)"`).FindStringSubmatch(q); m != nil {
+        tf = m[1]
+    }
+    if m := regexp.MustCompile(`\\b_command="([^"]+)"`).FindStringSubmatch(q); m != nil {
+        cmd = m[1]
+    }
+    return tf, cmd
+}
+
+// stripLabelFromParam removes a label matcher from a given parameter
 func stripLabelFromParam(vals url.Values, key, label string) {
     re := regexp.MustCompile(`,?` + regexp.QuoteMeta(label) + `="[^"]*"`)
     if vs, ok := vals[key]; ok {
         for i, s := range vs {
             s = re.ReplaceAllString(s, "")
             s = regexp.MustCompile(`,+`).ReplaceAllString(s, ",")
-            s = regexp.MustCompile(`\{\s*,+`).ReplaceAllString(s, "{")
-            s = regexp.MustCompile(`,+\s*\}`).ReplaceAllString(s, "}")
+            s = regexp.MustCompile(`{\\s*,+`).ReplaceAllString(s, "{")
+            s = regexp.MustCompile(`,+\\s*}`).ReplaceAllString(s, "}")
             vs[i] = s
         }
         vals[key] = vs
     }
 }
 
-// remapMatch turns a single "match" into "match[]" for Prometheus
+// remapMatch ensures match[] is used rather than match
 func remapMatch(vals url.Values) {
     if m := vals["match"]; len(m) > 0 && vals.Get("match[]") == "" {
         vals["match[]"] = m
@@ -76,22 +90,9 @@ func remapMatch(vals url.Values) {
     }
 }
 
-// detectSelectors pulls out any chrono_timeframe="…" or _command="…"
-func detectSelectors(vals url.Values) (string, string) {
-    q := vals.Get("query")
-    tf, cmd := "", ""
-    if m := regexp.MustCompile(`\bchrono_timeframe="([^"]+)"`).FindStringSubmatch(q); m != nil {
-        tf = m[1]
-    }
-    if m := regexp.MustCompile(`\b_command="([^"]+)"`).FindStringSubmatch(q); m != nil {
-        cmd = m[1]
-    }
-    return tf, cmd
-}
+// ─── FORWARD / BUILD QS ───────────────────────────────────────────────────────
 
-// ─── UPSTREAM FORWARDING ──────────────────────────────────────────────────────
-
-// buildQueryString serializes url.Values preserving [] syntax
+// buildQueryString constructs a URL-encoded query string
 func buildQueryString(vals url.Values) string {
     parts := []string{}
     for k, vs := range vals {
@@ -106,7 +107,7 @@ func buildQueryString(vals url.Values) string {
     return strings.Join(parts, "&")
 }
 
-// forward proxies any request unchanged
+// forward proxies all other requests unchanged
 func forward(w http.ResponseWriter, r *http.Request, client *http.Client, urlStr string) {
     var req *http.Request
     var err error
@@ -133,99 +134,111 @@ func forward(w http.ResponseWriter, r *http.Request, client *http.Client, urlStr
     io.Copy(w, resp.Body)
 }
 
-// ─── WINDOWS FETCHING ─────────────────────────────────────────────────────────
+// ─── FETCH WINDOWS ────────────────────────────────────────────────────────────
 
-// fetchWindowsInstant grabs five instant vectors (0,7,14,21,28d)
-func fetchWindowsInstant(p *ChronoProxy, params url.Values, urlStr, command string) []map[string]interface{} {
-    all := []map[string]interface{}{}
+type instantRes struct {
+    Data struct {
+        Result []struct {
+            Metric map[string]interface{} `json:"metric"`
+            Value  [2]interface{}         `json:"value"`
+        } `json:"result"`
+    } `json:"data"`
+}
+
+func fetchWindowsInstant(p *ChronoProxy, params url.Values, endpoint, command string) []map[string]interface{} {
+    var all []map[string]interface{}
     for i, offset := range p.offsets {
         tf := p.timeframes[i]
         base := parseTime(params.Get("time"))
         params.Set("time", strconv.FormatInt(base-offset, 10))
-        u := urlStr + "?" + buildQueryString(params)
+
+        u := endpoint + "?" + buildQueryString(params)
         resp, err := p.client.Get(u)
         if err != nil {
             continue
         }
-        body, _ := io.ReadAll(resp.Body); resp.Body.Close()
-        var jr map[string]interface{}
-        json.Unmarshal(body, &jr)
-        data, ok := jr["data"].(map[string]interface{})
-        if !ok {
+        body, _ := io.ReadAll(resp.Body)
+        resp.Body.Close()
+
+        var jr instantRes
+        if err := json.Unmarshal(body, &jr); err != nil {
             continue
         }
-        results, ok := data["result"].([]interface{})
-        if !ok {
-            continue
-        }
-        for _, it := range results {
-            s := it.(map[string]interface{})
-            pair := s["value"].([]interface{})
-            ts := int64(pair[0].(float64))
-            val := fmt.Sprintf("%v", pair[1])
-            s["value"] = []interface{}{ts + offset, val}
-            m := s["metric"].(map[string]interface{})
+        for _, s := range jr.Data.Result {
+            tsf := s.Value[0].(float64)
+            ts := int64(tsf) + offset
+            val := fmt.Sprintf("%v", s.Value[1])
+
+            m := copyMetric(s.Metric)
             m["chrono_timeframe"] = tf
             if command != "" {
                 m["_command"] = command
             }
-            all = append(all, s)
+
+            all = append(all, map[string]interface{}{
+                "metric": m,
+                "value":  []interface{}{ts, val},
+            })
         }
     }
     return all
 }
 
-// fetchWindowsRange grabs five range matrices
-func fetchWindowsRange(p *ChronoProxy, params url.Values, urlStr, command string) []map[string]interface{} {
-    all := []map[string]interface{}{}
+type rangeRes struct {
+    Data struct {
+        Result []struct {
+            Metric map[string]interface{} `json:"metric"`
+            Values [][2]interface{}       `json:"values"`
+        } `json:"result"`
+    } `json:"data"`
+}
+
+func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command string) []map[string]interface{} {
+    var all []map[string]interface{}
     for i, offset := range p.offsets {
         tf := p.timeframes[i]
         start := parseTime(params.Get("start")) - offset
         end := parseTime(params.Get("end")) - offset
         params.Set("start", strconv.FormatInt(start, 10))
-        params.Set("end", strconv.FormatInt(end, 10))
-        u := urlStr + "?" + buildQueryString(params)
+        params.Set("end",   strconv.FormatInt(end,   10))
+
+        u := endpoint + "?" + buildQueryString(params)
         resp, err := p.client.Get(u)
         if err != nil {
             continue
         }
-        body, _ := io.ReadAll(resp.Body); resp.Body.Close()
-        var jr map[string]interface{}
-        json.Unmarshal(body, &jr)
-        data, ok := jr["data"].(map[string]interface{})
-        if !ok {
+        body, _ := io.ReadAll(resp.Body)
+        resp.Body.Close()
+
+        var jr rangeRes
+        if err := json.Unmarshal(body, &jr); err != nil {
             continue
         }
-        results, ok := data["result"].([]interface{})
-        if !ok {
-            continue
-        }
-        for _, it := range results {
-            s := it.(map[string]interface{})
-            vs, ok := s["values"].([]interface{})
-            if !ok {
-                continue
-            }
-            shifted := []interface{}{}
-            for _, iv := range vs {
-                pair := iv.([]interface{})
-                ts := int64(pair[0].(float64))
+        for _, s := range jr.Data.Result {
+            shifted := make([]interface{}, len(s.Values))
+            for j, pair := range s.Values {
+                tsf := pair[0].(float64)
+                ts := int64(tsf) + offset
                 val := fmt.Sprintf("%v", pair[1])
-                shifted = append(shifted, []interface{}{ts + offset, val})
+                shifted[j] = []interface{}{ts, val}
             }
-            s["values"] = shifted
-            m := s["metric"].(map[string]interface{})
+            m := copyMetric(s.Metric)
             m["chrono_timeframe"] = tf
             if command != "" {
                 m["_command"] = command
             }
-            all = append(all, s)
+            all = append(all, map[string]interface{}{
+                "metric": m,
+                "values": shifted,
+            })
         }
     }
     return all
 }
 
-// containsString checks for a string in []interface{}
+// ─── HELPERS ───────────────────────────────────────────────────────────────────
+
+// containsString checks if arr contains s
 func containsString(arr []interface{}, s string) bool {
     for _, v := range arr {
         if str, ok := v.(string); ok && str == s {
@@ -235,9 +248,7 @@ func containsString(arr []interface{}, s string) bool {
     return false
 }
 
-// ─── TIME & SIGNATURE HELPERS ────────────────────────────────────────────────
-
-// parseTime parses integer or RFC3339 → epoch seconds
+// parseTime parses int seconds or RFC3339, falling back to now
 func parseTime(s string) int64 {
     if i, err := strconv.ParseInt(s, 10, 64); err == nil {
         return i
@@ -248,61 +259,67 @@ func parseTime(s string) int64 {
     return time.Now().Unix()
 }
 
-// signature returns a canonical JSON key, minus synthetic labels
-func signature(metric map[string]interface{}) string {
-    m := copyMetric(metric)
-    delete(m, "chrono_timeframe")
-    delete(m, "_command")
-    keys := make([]string, 0, len(m))
-    for k := range m {
+// signature returns a JSON string of metric without synthetic labels
+func signature(m map[string]interface{}) string {
+    cp := copyMetric(m)
+    delete(cp, "chrono_timeframe")
+    delete(cp, "_command")
+    keys := make([]string, 0, len(cp))
+    for k := range cp {
         keys = append(keys, k)
     }
     sort.Strings(keys)
-    ordered := map[string]interface{}{}
+    ord := map[string]interface{}{}
     for _, k := range keys {
-        ordered[k] = m[k]
+        ord[k] = cp[k]
     }
-    b, _ := json.Marshal(ordered)
+    b, _ := json.Marshal(ord)
     return string(b)
 }
 
-// copyMetric shallow-copies the metric map
+// copyMetric deep copies a metric map
 func copyMetric(orig map[string]interface{}) map[string]interface{} {
-    c := map[string]interface{}{}
+    dup := make(map[string]interface{}, len(orig))
     for k, v := range orig {
-        c[k] = v
+        dup[k] = v
     }
-    return c
+    return dup
 }
 
-// ─── DEDUPE & AVERAGING ──────────────────────────────────────────────────────
-
-// dedupeSeries groups by signature, flattens
+// dedupeSeries removes duplicate series by signature
 func dedupeSeries(all []map[string]interface{}) []map[string]interface{} {
-    bySig := map[string][]map[string]interface{}{}
+    bySig := make(map[string][]map[string]interface{})
     for _, s := range all {
         sig := signature(s["metric"].(map[string]interface{}))
         bySig[sig] = append(bySig[sig], s)
     }
-    out := []map[string]interface{}{}
+    var out []map[string]interface{}
     for _, grp := range bySig {
         out = append(out, grp...)
     }
     return out
 }
 
-// proxyTimeframes exposes the list of chrono_timeframe tags
+// proxyTimeframes lists the windows
 func proxyTimeframes() []string {
     return []string{"current", "7days", "14days", "21days", "28days"}
 }
 
-// buildLastMonthAverage builds one avg series per metric signature
-func buildLastMonthAverage(seriesList []map[string]interface{}, isRange bool) []map[string]interface{} {
+// buildLastMonthAverage computes the averaged series per signature
+func buildLastMonthAverage(
+    seriesList []map[string]interface{},
+    isRange bool,
+) []map[string]interface{} {
+
+	if DebugMode {
+		log.Println("buildLastMonthAverage")
+	}
+
     n := len(proxyTimeframes()) - 1
     if n < 1 {
         return nil
     }
-    groups := map[string][]map[string]interface{}{}
+    groups := make(map[string][]map[string]interface{})
     for _, s := range seriesList {
         m := s["metric"].(map[string]interface{})
         if m["chrono_timeframe"] == "current" {
@@ -314,9 +331,9 @@ func buildLastMonthAverage(seriesList []map[string]interface{}, isRange bool) []
         sig := signature(base)
         groups[sig] = append(groups[sig], s)
     }
-    out := []map[string]interface{}{}
+    var out []map[string]interface{}
     for sig, grp := range groups {
-        sums := map[int64]float64{}
+        sums := make(map[int64]float64)
         for _, s := range grp {
             var pts []interface{}
             if isRange {
@@ -326,23 +343,44 @@ func buildLastMonthAverage(seriesList []map[string]interface{}, isRange bool) []
             }
             for _, iv := range pts {
                 pair := iv.([]interface{})
-                ts := int64(pair[0].(float64))
-                v, _ := strconv.ParseFloat(fmt.Sprintf("%v", pair[1]), 64)
-                minute := (ts / 60) * 60
+                // robust TS conversion
+                var tsF float64
+                switch t := pair[0].(type) {
+                case float64:
+                    tsF = t
+                case int64:
+                    tsF = float64(t)
+                case int:
+                    tsF = float64(t)
+                case json.Number:
+                    if f, err := t.Float64(); err == nil {
+                        tsF = f
+                    } else {
+                        continue
+                    }
+                default:
+                    continue
+                }
+                minute := (int64(tsF) / 60) * 60
+                vStr := fmt.Sprintf("%v", pair[1])
+                v, err := strconv.ParseFloat(vStr, 64)
+                if err != nil {
+                    continue
+                }
                 sums[minute] += v
             }
         }
-        mins := make([]int64, 0, len(sums))
+        var mins []int64
         for m := range sums {
             mins = append(mins, m)
         }
         sort.Slice(mins, func(i, j int) bool { return mins[i] < mins[j] })
-        ptsOut := []interface{}{}
+        var ptsOut []interface{}
         for _, m := range mins {
             avg := sums[m] / float64(n)
             ptsOut = append(ptsOut, []interface{}{m, fmt.Sprintf("%g", avg)})
         }
-        metric := map[string]interface{}{}
+        metric := make(map[string]interface{})
         json.Unmarshal([]byte(sig), &metric)
         metric["chrono_timeframe"] = "lastMonthAverage"
         if isRange {
@@ -352,126 +390,239 @@ func buildLastMonthAverage(seriesList []map[string]interface{}, isRange bool) []
             out = append(out, map[string]interface{}{"metric": metric, "value": last})
         }
     }
+	if DebugMode {
+		log.Printf("buildLastMonthAverage: %d series", len(out))
+	}
     return out
 }
 
-// indexBySignature builds maps of current & avg series by signature
-func indexBySignature(
-    all []map[string]interface{},
-    avgList []map[string]interface{},
-) (map[string]map[string]interface{}, map[string]map[string]interface{}) {
-    curBySig := map[string]map[string]interface{}{}
-    avgBySig := map[string]map[string]interface{}{}
-    for _, s := range all {
-        m := s["metric"].(map[string]interface{})
-        if m["chrono_timeframe"] == "current" {
-            curBySig[signature(m)] = s
-        }
-    }
-    for _, a := range avgList {
-        m := a["metric"].(map[string]interface{})
-        avgBySig[signature(m)] = a
-    }
-    return curBySig, avgBySig
-}
-
-// appendWithCommand tacks on avgList carrying _command
-func appendWithCommand(
-    base []map[string]interface{},
-    avgList []map[string]interface{},
-    command string,
-) []map[string]interface{} {
-    out := base
-    for _, avg := range avgList {
-        if command != "" {
-            avg["metric"].(map[string]interface{})["_command"] = command
-        }
-        out = append(out, avg)
-    }
-    return out
-}
-
-// appendCompare builds compareAgainstLast28
+// appendCompare adds compareAgainstLast28 for both instant & range
 func appendCompare(
     base []map[string]interface{},
-    curBySig, avgBySig map[string]map[string]interface{},
+    curMap, avgMap map[string]map[string]interface{},
     command string,
     isRange bool,
 ) []map[string]interface{} {
+	if DebugMode {
+		log.Println("appendCompare")
+	}
+	// base is the current series
     out := base
-    for sig, cur := range curBySig {
-        avg, ok := avgBySig[sig]
+
+    for sig, c := range curMap {
+        a, ok := avgMap[sig]
         if !ok {
             continue
         }
-        mCur := cur["metric"].(map[string]interface{})
-        nm := copyMetric(mCur)
+
+        // prepare metric
+        orig := c["metric"].(map[string]interface{})
+        nm := copyMetric(orig)
         nm["chrono_timeframe"] = "compareAgainstLast28"
         if command != "" {
             nm["_command"] = command
         }
+
         if !isRange {
-            pc := cur["value"].([]interface{})
-            va := avg["value"].([]interface{})[1].(string)
-            vc := pc[1].(string)
-            dv, _ := strconv.ParseFloat(vc, 64)
-            av, _ := strconv.ParseFloat(va, 64)
-            delta := dv - av
+            // instant case
+            cv := c["value"].([]interface{})
+            av := a["value"].([]interface{})
+            vc, _ := strconv.ParseFloat(fmt.Sprintf("%v", cv[1]), 64)
+            va, _ := strconv.ParseFloat(fmt.Sprintf("%v", av[1]), 64)
+            diff := vc - va
             out = append(out, map[string]interface{}{
                 "metric": nm,
-                "value":  []interface{}{pc[0], fmt.Sprintf("%g", delta)},
+                "value":  []interface{}{cv[0], fmt.Sprintf("%g", diff)},
+            })
+        } else {
+            // range case: build lookup of average by timestamp
+            aVals := a["values"].([]interface{})
+            avgByTs := make(map[int64]float64, len(aVals))
+            for _, iv := range aVals {
+                pair := iv.([]interface{})
+                // robust timestamp decode
+                var tsF float64
+                switch t := pair[0].(type) {
+                case float64:
+                    tsF = t
+                case int64:
+                    tsF = float64(t)
+                case int:
+                    tsF = float64(t)
+                case json.Number:
+                    if f, err := t.Float64(); err == nil {
+                        tsF = f
+                    } else {
+                        continue
+                    }
+                default:
+                    continue
+                }
+                ts := int64(tsF)
+                v, _ := strconv.ParseFloat(fmt.Sprintf("%v", pair[1]), 64)
+                avgByTs[ts] = v
+            }
+
+            // subtract average from current series point-by-point
+            cVals := c["values"].([]interface{})
+            var valsOut []interface{}
+            for _, iv := range cVals {
+                pair := iv.([]interface{})
+                var tsF float64
+                switch t := pair[0].(type) {
+                case float64:
+                    tsF = t
+                case int64:
+                    tsF = float64(t)
+                case int:
+                    tsF = float64(t)
+                case json.Number:
+                    if f, err := t.Float64(); err == nil {
+                        tsF = f
+                    } else {
+                        continue
+                    }
+                default:
+                    continue
+                }
+                ts := int64(tsF)
+                vc, _ := strconv.ParseFloat(fmt.Sprintf("%v", pair[1]), 64)
+                va := avgByTs[ts] // zero if missing
+                diff := vc - va
+                valsOut = append(valsOut, []interface{}{ts, fmt.Sprintf("%g", diff)})
+            }
+
+            out = append(out, map[string]interface{}{
+                "metric": nm,
+                "values": valsOut,
             })
         }
-        // range version omitted for brevity
     }
+	if DebugMode {
+		log.Printf("appendCompare: %d series", len(out))
+	}
     return out
 }
 
-// appendPercent builds percentCompareAgainstLast28
+// appendPercent adds percentCompareAgainstLast28 for both instant & range
 func appendPercent(
     base []map[string]interface{},
-    curBySig, avgBySig map[string]map[string]interface{},
+    curMap, avgMap map[string]map[string]interface{},
     command string,
     isRange bool,
 ) []map[string]interface{} {
+
+	if DebugMode {
+		log.Println("appendPercent")
+	}
+
     out := base
-    for sig, cur := range curBySig {
-        avg, ok := avgBySig[sig]
+
+    for sig, c := range curMap {
+        a, ok := avgMap[sig]
         if !ok {
             continue
         }
-        mCur := cur["metric"].(map[string]interface{})
-        nm := copyMetric(mCur)
+
+        orig := c["metric"].(map[string]interface{})
+        nm := copyMetric(orig)
         nm["chrono_timeframe"] = "percentCompareAgainstLast28"
         if command != "" {
             nm["_command"] = command
         }
+
         if !isRange {
-            pc := cur["value"].([]interface{})
-            va := avg["value"].([]interface{})[1].(string)
-            vc := pc[1].(string)
-            dv, _ := strconv.ParseFloat(vc, 64)
-            av, _ := strconv.ParseFloat(va, 64)
+            cv := c["value"].([]interface{})
+            av := a["value"].([]interface{})
+            vc, _ := strconv.ParseFloat(fmt.Sprintf("%v", cv[1]), 64)
+            va, _ := strconv.ParseFloat(fmt.Sprintf("%v", av[1]), 64)
             pct := 0.0
-            if av != 0 {
-                pct = (dv-av)/av * 100
+            if va != 0 {
+                pct = (vc - va) / va * 100
             }
             out = append(out, map[string]interface{}{
                 "metric": nm,
-                "value":  []interface{}{pc[0], fmt.Sprintf("%g", pct)},
+                "value":  []interface{}{cv[0], fmt.Sprintf("%g", pct)},
+            })
+        } else {
+            aVals := a["values"].([]interface{})
+            avgByTs := make(map[int64]float64, len(aVals))
+            for _, iv := range aVals {
+                pair := iv.([]interface{})
+                var tsF float64
+                switch t := pair[0].(type) {
+                case float64:
+                    tsF = t
+                case int64:
+                    tsF = float64(t)
+                case int:
+                    tsF = float64(t)
+                case json.Number:
+                    if f, err := t.Float64(); err == nil {
+                        tsF = f
+                    } else {
+                        continue
+                    }
+                default:
+                    continue
+                }
+                ts := int64(tsF)
+                v, _ := strconv.ParseFloat(fmt.Sprintf("%v", pair[1]), 64)
+                avgByTs[ts] = v
+            }
+
+            cVals := c["values"].([]interface{})
+            var valsOut []interface{}
+            for _, iv := range cVals {
+                pair := iv.([]interface{})
+                var tsF float64
+                switch t := pair[0].(type) {
+                case float64:
+                    tsF = t
+                case int64:
+                    tsF = float64(t)
+                case int:
+                    tsF = float64(t)
+                case json.Number:
+                    if f, err := t.Float64(); err == nil {
+                        tsF = f
+                    } else {
+                        continue
+                    }
+                default:
+                    continue
+                }
+                ts := int64(tsF)
+                vc, _ := strconv.ParseFloat(fmt.Sprintf("%v", pair[1]), 64)
+                va := avgByTs[ts]
+                pct := 0.0
+                if va != 0 {
+                    pct = (vc - va) / va * 100
+                }
+                valsOut = append(valsOut, []interface{}{ts, fmt.Sprintf("%g", pct)})
+            }
+
+            out = append(out, map[string]interface{}{
+                "metric": nm,
+                "values": valsOut,
             })
         }
-        // range version omitted for brevity
     }
+
+	if DebugMode {
+		log.Printf("appendPercent: %d series", len(out))
+	}
+
     return out
 }
 
-// filterByTimeframe filters for a single chrono_timeframe
+
+// filterByTimeframe returns only series matching tf label
 func filterByTimeframe(
     all []map[string]interface{},
     tf string,
 ) []map[string]interface{} {
-    out := []map[string]interface{}{}
+    var out []map[string]interface{}
     for _, s := range all {
         if s["metric"].(map[string]interface{})["chrono_timeframe"] == tf {
             out = append(out, s)
@@ -480,21 +631,64 @@ func filterByTimeframe(
     return out
 }
 
-// writeJSON emits the standard Prometheus envelope
+// writeJSON writes a Prometheus-style v1 JSON response
 func writeJSON(w http.ResponseWriter, rt string, result []map[string]interface{}) {
     w.Header().Set("Content-Type", "application/json")
-    out := map[string]interface{}{
+    json.NewEncoder(w).Encode(map[string]interface{}{
         "status": "success",
         "data": map[string]interface{}{
             "resultType": rt,
             "result":     result,
         },
-    }
-    json.NewEncoder(w).Encode(out)
+    })
 }
 
-// writeJSONRaw emits any raw JSON-able object
+// writeJSONRaw writes arbitrary JSON
 func writeJSONRaw(w http.ResponseWriter, v interface{}) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(v)
 }
+
+// indexBySignature builds two maps keyed by metric signature:
+//   - curMap: all “current” series from `all`
+//   - avgMap: all synthetic average series from `avgList`
+func indexBySignature(
+    all []map[string]interface{},
+    avgList []map[string]interface{},
+) (map[string]map[string]interface{}, map[string]map[string]interface{}) {
+
+    curMap := make(map[string]map[string]interface{}, len(all))
+    avgMap := make(map[string]map[string]interface{}, len(avgList))
+
+    // collect current series
+    for _, s := range all {
+        m := s["metric"].(map[string]interface{})
+        if tf, ok := m["chrono_timeframe"].(string); ok && tf == "current" {
+            curMap[signature(m)] = s
+        }
+    }
+    // collect average series
+    for _, s := range avgList {
+        m := s["metric"].(map[string]interface{})
+        avgMap[signature(m)] = s
+    }
+    return curMap, avgMap
+}
+
+// appendWithCommand merges in avgList into base, injecting _command into each
+// synthetic series if command is non-empty.
+func appendWithCommand(
+    base []map[string]interface{},
+    avgList []map[string]interface{},
+    command string,
+) []map[string]interface{} {
+    out := base
+    for _, a := range avgList {
+        if command != "" {
+            a["metric"].(map[string]interface{})["_command"] = command
+        }
+        out = append(out, a)
+    }
+    return out
+}
+
