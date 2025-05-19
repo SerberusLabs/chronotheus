@@ -175,7 +175,7 @@ func (p *ChronoProxy) handleLabels(w http.ResponseWriter, r *http.Request, upstr
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(out)
 	if DebugMode {
-		log.Printf("[DEBUG] handleLabels written to requester: %v", out)
+		log.Printf("[DEBUG] handleLabels written to requester")
 	}
 }
 
@@ -218,7 +218,7 @@ func (p *ChronoProxy) handleLabelValues(w http.ResponseWriter, r *http.Request, 
     w.Header().Set("Content-Type", "application/json")
     io.Copy(w, resp.Body)
 	if DebugMode {
-		log.Printf("[DEBUG] handleLabelValues written to requester: %s", label)
+		log.Printf("[DEBUG] handleLabelValues written to requester")
 	}
 }
 

@@ -196,6 +196,9 @@ type rangeRes struct {
 func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command string) []map[string]interface{} {
     var all []map[string]interface{}
     for i, offset := range p.offsets {
+        if DebugMode {
+            log.Printf("fetchWindowsRange: %d offset %d", i, offset)
+        }
         tf := p.timeframes[i]
         start := parseTime(params.Get("start")) - offset
         end := parseTime(params.Get("end")) - offset
@@ -214,6 +217,10 @@ func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command stri
         if err := json.Unmarshal(body, &jr); err != nil {
             continue
         }
+        if DebugMode {
+            log.Printf("fetchWindowsRange: %d series", len(jr.Data.Result))
+        }
+        if len(jr.Data.Result) == 0 {
         for _, s := range jr.Data.Result {
             shifted := make([]interface{}, len(s.Values))
             for j, pair := range s.Values {
@@ -232,7 +239,14 @@ func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command stri
                 "values": shifted,
             })
         }
+        if DebugMode {  
+            log.Printf("fetchWindowsRange %d offset %d loop completed: %d series", i, offset, len(all))
+        }
     }
+    if DebugMode {
+        log.Printf("fetchWindowsRange outer completed")
+    }
+    
     return all
 }
 
