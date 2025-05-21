@@ -1,0 +1,34 @@
+# Chronotheus Configuration
+
+# Upstream Prometheus server URL
+upstream_url = "http://localhost:9090"
+
+# Local server configuration
+listen_addr = "127.0.0.1"
+listen_port = 8080
+
+# Historical timeframes for comparison
+# These labels will be available in PromQL queries
+timeframes = [
+    "current",      # Current time slice
+    "7days",        # Week ago
+    "14days",       # Two weeks ago
+    "21days",       # Three weeks ago
+    "28days"        # Four weeks ago
+]
+
+# Time offsets in seconds corresponding to timeframes
+# Must match the number of timeframes above
+offsets = [
+    0,              # current (no offset)
+    604800,         # 7 days in seconds
+    1209600,        # 14 days in seconds
+    1814400,        # 21 days in seconds
+    2419200         # 28 days in seconds
+]
+
+# Optional: Debug logging (default: false)
+debug = false
+
+# Optional: Custom endpoint prefix (default: empty)
+# prefix = "/chronotheus"
