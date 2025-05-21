@@ -46,12 +46,10 @@ func (p *ChronoProxy) handleQuery(w http.ResponseWriter, r *http.Request, upstre
 
     // 6) Fetch + shift
     all := fetchWindowsInstant(effProxy, params, upstream+path, command)
-    
-    // 7) Build synthetics
     merged := dedupeSeries(all)
 
-    // Filter before building synthetics if a specific timeframe was requested
-     if requestedTf != "" && !isRawTf(requestedTf, p.timeframes) && command != "DONT_REMOVE_UNUSED_HISTORICS" {
+    // Filter if a specific timeframe was requested and we're not keeping historics
+    if requestedTf != "" && command != "DONT_REMOVE_UNUSED_HISTORICS" {
         merged = filterByTimeframe(merged, requestedTf)
     }
 
@@ -117,8 +115,8 @@ func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, u
     all := fetchWindowsRange(effProxy, params, upstream+path, command)
     merged := dedupeSeries(all)
 
-    // Only filter if it's not a raw timeframe (since effProxy already handled that)
-    if requestedTf != "" && !isRawTf(requestedTf, p.timeframes) && command != "DONT_REMOVE_UNUSED_HISTORICS" {
+    // Filter if a specific timeframe was requested and we're not keeping historics
+    if requestedTf != "" && command != "DONT_REMOVE_UNUSED_HISTORICS" {
         merged = filterByTimeframe(merged, requestedTf)
     }
 
