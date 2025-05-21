@@ -118,12 +118,12 @@ func forward(w http.ResponseWriter, r *http.Request, client *http.Client, urlStr
         req, err = http.NewRequest(r.Method, urlStr, bytes.NewReader(body))
     }
     if err != nil {
-        http.Error(w, err.Error(), 500)
+        http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
     resp, err := client.Do(req)
     if err != nil {
-        http.Error(w, err.Error(), 502)
+        http.Error(w, err.Error(), http.StatusBadGateway)
         return
     }
     defer resp.Body.Close()
