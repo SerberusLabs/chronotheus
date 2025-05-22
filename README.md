@@ -95,11 +95,14 @@ Debug mode will show:
 
 ```
 http://<HOST>:8080/<UPSTREAM_PROM_HOST>_<UPSTREAM_PROM_PORT>
-`
-  For example:
-  `
+```
+
+For example:
+
+```
 http://localhost:8080/prometheus_9090
-``
+```
+
 4. Leave **Access** on "Server (default)".
 5. Click **Save & test**—it should say "Data source is working".
 
@@ -113,7 +116,7 @@ Now when you query in Grafana, prepend nothing! Just use your normal PromQL:
 
 ## 📂 Project Layout
 
-``
+```
 chronotheus/
 ├── go.mod ← Go module file
 ├── main.go ← server bootstrap
