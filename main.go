@@ -58,7 +58,9 @@ import (
 //   ./chronotheus -debug
 func main() {
 	debug := flag.Bool("debug", false, "enable debug logging")
+	listen := flag.String("listen", "0.0.0.0:8080", "address to listen on (ip:port)")
 	flag.Parse()
+
 	if *debug {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 		log.Println("Debug logging enabled")
@@ -67,8 +69,8 @@ func main() {
 	proxy.DebugMode = *debug
 
 	p := proxy.NewChronoProxy()
-	log.Println("🚀 Chronotheus proxy listening on :8080")
-	if err := http.ListenAndServe(":8080", p); err != nil {
+	log.Printf("🚀 Chronotheus proxy listening on %s", *listen)
+	if err := http.ListenAndServe(*listen, p); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

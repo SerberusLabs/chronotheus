@@ -76,7 +76,13 @@ You should see:
 Currently supported flags:
 
 - `-debug`: Enable verbose debug logging
-- More configuration options coming soon!
+- `-listen`: Address to listen on (ip:port), defaults to "0.0.0.0:8080"
+
+Example with custom address:
+
+```bash
+./chronotheus -listen "127.0.0.1:9090"
+```
 
 Debug mode will show:
 
