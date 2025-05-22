@@ -12,70 +12,77 @@ import (
 
 // handleQuery implements /api/v1/query (instant).
 func (p *ChronoProxy) handleQuery(w http.ResponseWriter, r *http.Request, upstream, path string) {
+    if DebugMode {
+        log.Printf("[DEBUG] handleQuery: %s %s", r.Method, r.URL.Path)
+    }
 
-	if DebugMode {
-		log.Printf("[DEBUG] handleQuery: %s %s", r.Method, r.URL.Path)
-	}
-
-    // 1) Merge and normalize
     params := parseClientParams(r)
     remapMatch(params)
 
-    // 2) Pull out requestedTf and command
     requestedTf, command := extractSelectors(params)
-
-    // 3) Strip them from the raw PromQL
     stripLabelFromParam(params, "query", "chrono_timeframe")
     stripLabelFromParam(params, "query", "command")
 
-    // Handle timeframe selection
-    effProxy := p
-    if requestedTf != "" && command != "DONT_REMOVE_UNUSED_HISTORICS" {
-        // For synthetic timeframes, we need all data initially
-        if requestedTf == "lastMonthAverage" || 
-           requestedTf == "compareAgainstLast28" || 
-           requestedTf == "percentCompareAgainstLast28" {
-            effProxy = p
-        } else if isRawTf(requestedTf, p.timeframes) {
-            // For raw timeframes, only fetch the specific one
-            for i, tf := range p.timeframes {
-                if tf == requestedTf {
-                    effProxy = &ChronoProxy{
-                        offsets:    []int64{p.offsets[i]},
-                        timeframes: []string{tf},
-                        client:     p.client,
-                    }
-                    break
+    var merged []map[string]interface{}
+
+    // Case 1: No timeframe specified - return everything
+    if requestedTf == "" {
+        all := fetchWindowsInstant(p, params, upstream+path, command)
+        merged = dedupeSeries(all)
+        
+        // Also build synthetic timeframes
+        avg := buildLastMonthAverage(merged, false)
+        curM, avgM := indexBySignature(merged, avg)
+        
+        merged = append(merged, avg...)
+        merged = append(merged, appendCompare([]map[string]interface{}{}, curM, avgM, "", false)...)
+        merged = append(merged, appendPercent([]map[string]interface{}{}, curM, avgM, "", false)...)
+    } else if command == "DONT_REMOVE_UNUSED_HISTORICS" {
+        // Case 2: Keep all historics
+        all := fetchWindowsInstant(p, params, upstream+path, command)
+        merged = dedupeSeries(all)
+    } else if requestedTf == "lastMonthAverage" || 
+              requestedTf == "compareAgainstLast28" || 
+              requestedTf == "percentCompareAgainstLast28" {
+        // Case 3: Synthetic timeframes - need all data to calculate
+        all := fetchWindowsInstant(p, params, upstream+path, command)
+        merged = dedupeSeries(all)
+        
+        avg := buildLastMonthAverage(merged, false)
+        curM, avgM := indexBySignature(merged, avg)
+        
+        if requestedTf == "lastMonthAverage" {
+            merged = avg
+        } else if requestedTf == "compareAgainstLast28" {
+            merged = appendCompare([]map[string]interface{}{}, curM, avgM, "", false)
+        } else {
+            merged = appendPercent([]map[string]interface{}{}, curM, avgM, "", false)
+        }
+    } else {
+        // Case 4: Raw timeframe - only fetch that specific window
+        for i, tf := range p.timeframes {
+            if tf == requestedTf {
+                effProxy := &ChronoProxy{
+                    offsets:    []int64{p.offsets[i]},
+                    timeframes: []string{tf},
+                    client:     p.client,
                 }
+                all := fetchWindowsInstant(effProxy, params, upstream+path, command)
+                merged = dedupeSeries(all)
+                break
             }
         }
     }
 
-    all := fetchWindowsInstant(effProxy, params, upstream+path, command)
-    merged := dedupeSeries(all)
-
-    // Handle synthetic timeframes
-    if requestedTf != "" {
-        if requestedTf == "lastMonthAverage" {
-            merged = buildLastMonthAverage(merged, false)
-        } else if requestedTf == "compareAgainstLast28" {
-            avg := buildLastMonthAverage(merged, false)
-            curM, avgM := indexBySignature(merged, avg)
-            merged = appendCompare([]map[string]interface{}{}, curM, avgM, "", false)
-        } else if requestedTf == "percentCompareAgainstLast28" {
-            avg := buildLastMonthAverage(merged, false)
-            curM, avgM := indexBySignature(merged, avg)
-            merged = appendPercent([]map[string]interface{}{}, curM, avgM, "", false)
-        } else if command != "DONT_REMOVE_UNUSED_HISTORICS" {
-            // For raw timeframes, ensure only requested one is returned
-            merged = filterByTimeframe(merged, requestedTf)
-        }
+    // Filter by requested timeframe if specified
+    if requestedTf != "" && command != "DONT_REMOVE_UNUSED_HISTORICS" {
+        merged = filterByTimeframe(merged, requestedTf)
     }
 
     writeJSON(w, "vector", merged)
-	if DebugMode {
-		log.Printf("[DEBUG] handleQuery written to requester: %d series returned", len(merged))
-	}
+    if DebugMode {
+        log.Printf("[DEBUG] handleQuery written to requester: %d series returned", len(merged))
+    }
 }
 
 // handleQueryRange implements /api/v1/query_range (matrix).
@@ -88,58 +95,77 @@ func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, u
     remapMatch(params)
 
     requestedTf, command := extractSelectors(params)
+    
+    if DebugMode {
+        log.Printf("Selectors are(TF:'%s', command: '%s')", requestedTf,command)
+    }
+
     stripLabelFromParam(params, "query", "chrono_timeframe")
     stripLabelFromParam(params, "query", "command")
     if params.Get("step") == "" {
         params.Set("step", "60")
     }
 
-    // Handle timeframe selection
-    effProxy := p
-    if requestedTf != "" && command != "DONT_REMOVE_UNUSED_HISTORICS" {
-        // For synthetic timeframes, we need all data initially
-        if requestedTf == "lastMonthAverage" || 
-           requestedTf == "compareAgainstLast28" || 
-           requestedTf == "percentCompareAgainstLast28" {
-            effProxy = p
-        } else if isRawTf(requestedTf, p.timeframes) {
-            // For raw timeframes, only fetch the specific one
-            for i, tf := range p.timeframes {
-                if tf == requestedTf {
-                    effProxy = &ChronoProxy{
-                        offsets:    []int64{p.offsets[i]},
-                        timeframes: []string{tf},
-                        client:     p.client,
-                    }
-                    break
+    var merged []map[string]interface{}
+
+    // Case 1: No timeframe specified - return everything
+    if requestedTf == "" {
+        all := fetchWindowsRange(p, params, upstream+path, command)
+        merged = dedupeSeries(all)
+        
+        // Also build synthetic timeframes
+        avg := buildLastMonthAverage(merged, true)
+        curM, avgM := indexBySignature(merged, avg)
+        
+        merged = append(merged, avg...)
+        merged = append(merged, appendCompare([]map[string]interface{}{}, curM, avgM, "", true)...)
+        merged = append(merged, appendPercent([]map[string]interface{}{}, curM, avgM, "", true)...)
+    } else if command == "DONT_REMOVE_UNUSED_HISTORICS" {
+        // Case 2: Keep all historics
+        all := fetchWindowsRange(p, params, upstream+path, command)
+        merged = dedupeSeries(all)
+    } else if requestedTf == "lastMonthAverage" || 
+              requestedTf == "compareAgainstLast28" || 
+              requestedTf == "percentCompareAgainstLast28" {
+        // Case 3: Synthetic timeframes - need all data to calculate
+        all := fetchWindowsRange(p, params, upstream+path, command)
+        merged = dedupeSeries(all)
+        
+        avg := buildLastMonthAverage(merged, true)
+        curM, avgM := indexBySignature(merged, avg)
+        
+        if requestedTf == "lastMonthAverage" {
+            merged = avg
+        } else if requestedTf == "compareAgainstLast28" {
+            merged = appendCompare([]map[string]interface{}{}, curM, avgM, "", true)
+        } else {
+            merged = appendPercent([]map[string]interface{}{}, curM, avgM, "", true)
+        }
+    } else {
+        // Case 4: Raw timeframe - only fetch that specific window
+        for i, tf := range p.timeframes {
+            if tf == requestedTf {
+                effProxy := &ChronoProxy{
+                    offsets:    []int64{p.offsets[i]},
+                    timeframes: []string{tf},
+                    client:     p.client,
                 }
+                all := fetchWindowsRange(effProxy, params, upstream+path, command)
+                merged = dedupeSeries(all)
+                break
             }
         }
     }
 
+    // Filter by requested timeframe if specified
     if DebugMode {
-        log.Printf("[DEBUG] handleQueryRange: using timeframes %v", effProxy.timeframes)
+        log.Printf("Entering cleanup process (TF is %s)", requestedTf)
     }
-
-    all := fetchWindowsRange(effProxy, params, upstream+path, command)
-    merged := dedupeSeries(all)
-
-    // Handle synthetic timeframes
-    if requestedTf != "" {
-        if requestedTf == "lastMonthAverage" {
-            merged = buildLastMonthAverage(merged, true)
-        } else if requestedTf == "compareAgainstLast28" {
-            avg := buildLastMonthAverage(merged, true)
-            curM, avgM := indexBySignature(merged, avg)
-            merged = appendCompare([]map[string]interface{}{}, curM, avgM, "", true)
-        } else if requestedTf == "percentCompareAgainstLast28" {
-            avg := buildLastMonthAverage(merged, true)
-            curM, avgM := indexBySignature(merged, avg)
-            merged = appendPercent([]map[string]interface{}{}, curM, avgM, "", true)
-        } else if command != "DONT_REMOVE_UNUSED_HISTORICS" {
-            // For raw timeframes, ensure only requested one is returned
-            merged = filterByTimeframe(merged, requestedTf)
+    if requestedTf != "" && command != "DONT_REMOVE_UNUSED_HISTORICS" {
+        if DebugMode {
+            log.Printf("Conditional OK")
         }
+        merged = filterByTimeframe(merged, requestedTf)
     }
 
     writeJSON(w, "matrix", merged)
@@ -237,11 +263,19 @@ func (p *ChronoProxy) handleLabelValues(w http.ResponseWriter, r *http.Request, 
 // --- Helper to pull out both chrono_timeframe & _command from match[] or inline ---
 func extractSelectors(vals url.Values) (string, string) {
     tf, cmd := "", ""
+    
+    if DebugMode {
+        log.Printf("[DEBUG] extractSelectors checking match[] values: %v", vals["match[]"])
+    }
+
     if vs, ok := vals["match[]"]; ok {
         for i, m := range vs {
             if re := regexp.MustCompile(`^chrono_timeframe="([^"]+)"$`); re.MatchString(m) {
                 tf = re.FindStringSubmatch(m)[1]
                 vals["match[]"] = append(vs[:i], vs[i+1:]...)
+                if DebugMode {
+                    log.Printf("[DEBUG] Found timeframe in match[]: %s", tf)
+                }
                 break
             }
         }
@@ -249,17 +283,32 @@ func extractSelectors(vals url.Values) (string, string) {
             if re := regexp.MustCompile(`^_command="([^"]+)"$`); re.MatchString(m) {
                 cmd = re.FindStringSubmatch(m)[1]
                 vals["match[]"] = append(vals["match[]"][:i], vals["match[]"][i+1:]...)
+                if DebugMode {
+                    log.Printf("[DEBUG] Found command in match[]: %s", cmd)
+                }
                 break
             }
         }
     }
-    tf2, cmd2 := detectSelectors(vals)
-    if tf == "" {
-        tf = tf2
+
+    // Try inline detection if nothing found in match[]
+    if tf == "" || cmd == "" {
+        if DebugMode {
+            log.Printf("[DEBUG] Checking inline selectors in query: %s", vals.Get("query"))
+        }
+        tf2, cmd2 := detectSelectors(vals)
+        if tf == "" {
+            tf = tf2
+        }
+        if cmd == "" {
+            cmd = cmd2
+        }
     }
-    if cmd == "" {
-        cmd = cmd2
+
+    if DebugMode {
+        log.Printf("[DEBUG] Final selector values - timeframe: '%s', command: '%s'", tf, cmd)
     }
+
     return tf, cmd
 }
 
@@ -272,3 +321,6 @@ func isRawTf(tf string, raws []string) bool {
     }
     return false
 }
+
+
+
