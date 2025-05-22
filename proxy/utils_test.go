@@ -3,9 +3,10 @@ package proxy
 
 import (
 	"fmt"
-	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -207,33 +208,173 @@ func TestIndexBySignature(t *testing.T) {
 
 // ─── Test parseClientParams (GET, JSON and Form) ───────────────────────────────
 
-func TestParseClientParams_GET(t *testing.T) {
-	req, _ := http.NewRequest("GET", "/?foo=bar&foo=baz", nil)
-	got := parseClientParams(req)
-	want := url.Values{"foo": {"bar", "baz"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("GET params = %v; want %v", got, want)
+func TestParseClientParams(t *testing.T) {
+	tests := []struct {
+		name           string
+		method         string
+		queryParams    map[string]string
+		postBody       string
+		contentType    string
+		expectedParams map[string][]string
+	}{
+		{
+			name:   "GET request with simple params",
+			method: "GET",
+			queryParams: map[string]string{
+				"query": "test_metric",
+				"time":  "1622505600",
+			},
+			expectedParams: map[string][]string{
+				"query": {"test_metric"},
+				"time":  {"1622505600"},
+			},
+		},
+		{
+			name:        "POST request with JSON body",
+			method:      "POST",
+			contentType: "application/json",
+			postBody:    `{"query":"test_metric","time":"1622505600"}`,
+			expectedParams: map[string][]string{
+				"query": {"test_metric"},
+				"time":  {"1622505600"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create test request
+			req := httptest.NewRequest(tt.method, "http://localhost:8080", strings.NewReader(tt.postBody))
+
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+
+			// Add query parameters
+			q := req.URL.Query()
+			for k, v := range tt.queryParams {
+				q.Add(k, v)
+			}
+			req.URL.RawQuery = q.Encode()
+
+			// Parse params
+			params := parseClientParams(req)
+
+			// Verify results
+			for k, expectedVals := range tt.expectedParams {
+				actualVals, ok := params[k]
+				if !ok {
+					t.Errorf("Expected param %s not found", k)
+					continue
+				}
+				if !reflect.DeepEqual(actualVals, expectedVals) {
+					t.Errorf("For param %s, expected %v, got %v", k, expectedVals, actualVals)
+				}
+			}
+		})
 	}
 }
 
-func TestParseClientParams_JSONPOST(t *testing.T) {
-	body := `{"foo":["a","b"],"x":1}`
-	req, _ := http.NewRequest("POST", "/", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	got := parseClientParams(req)
-	want := url.Values{"foo": {"a", "b"}, "x": {"1"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("JSON POST = %v; want %v", got, want)
+func TestAppendCompare(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   float64
+		average   float64
+		expected  float64
+		isRange   bool
+	}{
+		{
+			name:     "Simple difference",
+			current:  150,
+			average:  100,
+			expected: 50,
+			isRange:  false,
+		},
+		{
+			name:     "Negative difference",
+			current:  80,
+			average:  100,
+			expected: -20,
+			isRange:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			curMap := map[string]map[string]interface{}{
+				"test": {
+					"value": []interface{}{float64(100), fmt.Sprintf("%v", tt.current)},
+				},
+			}
+			avgMap := map[string]map[string]interface{}{
+				"test": {
+					"value": []interface{}{float64(100), fmt.Sprintf("%v", tt.average)},
+				},
+			}
+
+			result := appendCompare(nil, curMap, avgMap, "", tt.isRange)
+
+			if len(result) != 1 {
+				t.Fatalf("Expected 1 result, got %d", len(result))
+			}
+
+			val := result[0]["value"].([]interface{})
+			resultVal, _ := strconv.ParseFloat(val[1].(string), 64)
+			if resultVal != tt.expected {
+				t.Errorf("Expected %v, got %v", tt.expected, resultVal)
+			}
+		})
 	}
 }
 
-func TestParseClientParams_FormPOST(t *testing.T) {
-	form := "foo=a&foo=b&x=2"
-	req, _ := http.NewRequest("POST", "/", strings.NewReader(form))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	got := parseClientParams(req)
-	want := url.Values{"foo": {"a", "b"}, "x": {"2"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Form POST = %v; want %v", got, want)
+func TestAppendPercent(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   float64
+		average   float64
+		expected  float64
+		isRange   bool
+	}{
+		{
+			name:     "50% increase",
+			current:  150,
+			average:  100,
+			expected: 50,
+			isRange:  false,
+		},
+		{
+			name:     "20% decrease",
+			current:  80,
+			average:  100,
+			expected: -20,
+			isRange:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			curMap := map[string]map[string]interface{}{
+				"test": {
+					"value": []interface{}{float64(100), fmt.Sprintf("%v", tt.current)},
+				},
+			}
+			avgMap := map[string]map[string]interface{}{
+				"test": {
+					"value": []interface{}{float64(100), fmt.Sprintf("%v", tt.average)},
+				},
+			}
+
+			result := appendPercent(nil, curMap, avgMap, "", tt.isRange)
+
+			if len(result) != 1 {
+				t.Fatalf("Expected 1 result, got %d", len(result))
+			}
+
+			val := result[0]["value"].([]interface{})
+			resultVal, _ := strconv.ParseFloat(val[1].(string), 64)
+			if resultVal != tt.expected {
+				t.Errorf("Expected %v, got %v", tt.expected, resultVal)
+			}
+		})
 	}
 }

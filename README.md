@@ -1,6 +1,8 @@
 # Chronotheus
 
-> A slightly scatter-brained Prometheus proxy that sneaks in historical slices alongside "now" so Grafana can plot everything without extra plugins. A coffee and Amphetamine fulled Hyperfocus conversion from PHP to Go.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
+> A slightly scatter-brained Prometheus proxy that sneaks in historical slices alongside "now" so Grafana can plot everything without extra plugins. A coffee and Amphetamine fueled Hyperfocus conversion from PHP to Go.
 
 Chronotheus will:
 
@@ -20,7 +22,7 @@ Chronotheus will:
 
 ## 🛠️ Prerequisites
 
-- **Go 1.18+** installed and on your `PATH`
+- **Go 1.21+** installed and on your `PATH`
 - A running **Prometheus** instance you can reach
 - A caffeine or snack of your choice—you'll need it to read this README
 
@@ -30,38 +32,58 @@ Chronotheus will:
 
 1. Clone this repo and cd in:
    `bash
-  git clone https://github.com/andydixon/chronotheus.git
-  cd chronotheus
-  `
+git clone https://github.com/andydixon/chronotheus.git
+cd chronotheus
+`
 2. Initialize modules & fetch dependencies:
    `bash
-  go mod tidy
-  `
+go mod tidy
+`
 3. (Optional but highly recommended) Run the tests to make sure all helpers behave:
    `bash
-  go test ./proxy
-  `
+go test ./proxy
+`
 4. Build the binary:
    `bash
-  go build -o chronotheus main.go
-  `
+go build -o chronotheus main.go
+`
 5. You'll now have a `./chronotheus` executable ready to rock.
 
 ---
 
 ## ▶️ Running
 
-Simply:
+Basic usage:
 
-`bash
+```bash
 ./chronotheus
-`
+```
+
+With debug mode:
+
+```bash
+./chronotheus -debug
+```
 
 You should see:
 
-`🚀 Chronotheus proxy listening on :8080`
+```
+🚀 Chronotheus proxy listening on :8080
+```
 
-(It defaults to port 8080. You can slap it behind supervisor, a systemd unit, or 🔥 PM2 if you're feeling fancy.)
+## 🔧 Configuration
+
+Currently supported flags:
+
+- `-debug`: Enable verbose debug logging
+- More configuration options coming soon!
+
+Debug mode will show:
+
+- Detailed request/response information
+- Query parsing and transformation steps
+- Timeframe detection results
+- Series deduplication statistics
 
 ---
 
@@ -115,6 +137,32 @@ chronotheus/
 
 ---
 
+## 🧪 Synthetic Metrics
+
+Chronotheus generates three types of synthetic metrics:
+
+1. **lastMonthAverage**
+
+   - Average value across all historical windows
+   - Great for establishing baselines
+
+2. **compareAgainstLast28**
+
+   - Raw difference between current and average
+   - Shows absolute changes
+
+3. **percentCompareAgainstLast28**
+   - Percentage difference from average
+   - Better for comparing metrics of different scales
+
+**Important Notes:**
+
+- Synthetic metrics are generated after querying Prometheus
+- They cannot be used in PromQL expressions
+- Use them in separate queries for comparison
+
+---
+
 ## 🐞 Troubleshooting
 
 - **404 errors?** Make sure you included the`/host_port/`prefix in your Grafana URL.
@@ -124,7 +172,17 @@ chronotheus/
 
 ---
 
-## 📜 License
+## License
 
-GPLv3 © Andy Dixon
-(Feel free to fork, hack, snack, repeat.)
+Chronotheus is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.

@@ -1,3 +1,19 @@
+// Chronotheus - Time-traveling Prometheus Metrics Proxy
+// Copyright (C) 2025 Andy Dixon <andy@andydixon.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // proxy/handlers.go
 package proxy
 
@@ -10,7 +26,31 @@ import (
 	"regexp"
 )
 
-// handleQuery implements /api/v1/query (instant).
+// Welcome to the handler functions!! WOOOOOOO
+// These are like the bouncers at a club - they decide who gets in and what happens to them.
+// Quick map of what's where:
+//   - handleQuery: Handles instant queries (like "what's happening RIGHT NOW")
+//   - handleQueryRange: Same but for ranges (like "what happened in the last hour")
+//   - handleLabels: Lists all our cool label options
+//   - handleLabelValues: Shows what values each label can have
+//
+// The most interesting bit is how we handle timeframes:
+//   - Raw timeframes: current, 7days, 14days, etc
+//   - Synthetic timeframes: averages and comparisons we calculate
+//   - Magic command DONT_REMOVE_UNUSED_HISTORICS to see ALL THE THINGS!
+
+// handleQuery implements /api/v1/query endpoint for instant queries.
+// Think of it as taking a snapshot of your metrics RIGHT NOW! 📸
+//
+// How it works:
+// 1. Gets params and finds what timeframe you want (if any)
+// 2. Based on what you asked for:
+//    - No timeframe? You get everything + synthetics!
+//    - Want historics? You get ALL the timeframes!
+//    - Want averages? We'll do some mathematical magic
+//    - Specific timeframe? You get just that one!
+// 3. Filters out anything you don't want
+// 4. Sends it back as JSON
 func (p *ChronoProxy) handleQuery(w http.ResponseWriter, r *http.Request, upstream, path string) {
     if DebugMode {
         log.Printf("[DEBUG] handleQuery: %s %s", r.Method, r.URL.Path)
@@ -85,7 +125,14 @@ func (p *ChronoProxy) handleQuery(w http.ResponseWriter, r *http.Request, upstre
     }
 }
 
-// handleQueryRange implements /api/v1/query_range (matrix).
+// handleQueryRange is like handleQuery's older brother (or sister, depends how it self identifies) - it handles ranges of time
+// instead of just instant snapshots. Think "give me a graph" vs "give me a number".
+//
+// The flow is similar to handleQuery but with MORE DATA:
+// 1. Gets your params (including how big of steps you want - defaults to 60s)
+// 2. Figures out what timeframe you're interested in
+// 3. Does all the same magic as handleQuery but with sequences instead of points
+// 4. Returns a beautiful matrix of data points
 func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, upstream, path string) {
     if DebugMode {
         log.Printf("[DEBUG] handleQueryRange: %s %s", r.Method, r.URL.Path)
@@ -174,7 +221,14 @@ func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, u
     }
 }
 
-// handleLabels advertises chrono_timeframe + _command
+// handleLabels is our menu board! 🎯
+// It tells Prometheus what special labels we support (chrono_timeframe and _command).
+// Think of it like those signs outside a club that say "Tonight's Special: Time Travel! 🕰️"
+//
+// How it works:
+// 1. Gets the upstream labels (the regular ones)
+// 2. Adds our cool custom labels to the list
+// 3. Sends back the complete menu of options
 func (p *ChronoProxy) handleLabels(w http.ResponseWriter, r *http.Request, upstream, path string) {
 
 	if DebugMode {
@@ -217,7 +271,15 @@ func (p *ChronoProxy) handleLabels(w http.ResponseWriter, r *http.Request, upstr
 	}
 }
 
-// handleLabelValues serves synthetic label values
+// handleLabelValues is like a vending machine for label values! 
+// You put in a label name, it gives you all the possible values.
+//
+// Special cases:
+// - chrono_timeframe: Returns all our time windows (raw + synthetic)
+// - _command: Returns our magic commands (like DONT_REMOVE_UNUSED_HISTORICS)
+// - anything else: Passes through to the upstream Prometheus
+//
+// Pro tip: This is how Grafana knows what values to show in dropdowns! 
 func (p *ChronoProxy) handleLabelValues(w http.ResponseWriter, r *http.Request, upstream, path, label string) {
 
 	if DebugMode {
@@ -321,6 +383,3 @@ func isRawTf(tf string, raws []string) bool {
     }
     return false
 }
-
-
-
