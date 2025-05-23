@@ -38,10 +38,18 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/andydixon/chronotheus/proxy"
+)
+
+// Version information - these will be set at build time
+var (
+	Version   = "dev"
+	CommitSHA = "unknown"
+	BuildTime = "unknown"
 )
 
 // main is our entrypoint
@@ -59,8 +67,16 @@ import (
 func main() {
 	debug := flag.Bool("debug", false, "enable debug logging")
 	listen := flag.String("listen", "0.0.0.0:8080", "address to listen on (ip:port)")
+
 	flag.Parse()
 
+	fmt.Println("▗▄▄▖▐▌    ▄▄▄ ▄▄▄  ▄▄▄▄   ▄▄▄     ■  ▐▌   ▗▞▀▚▖█  ▐▌ ▄▄▄ ");
+	fmt.Println("▐▌   ▐▌   █   █   █ █   █ █   █ ▗▄▟▙▄▖▐▌   ▐▛▀▀▘▀▄▄▞▘▀▄▄  ");
+	fmt.Println("▐▌   ▐▛▀▚▖█   ▀▄▄▄▀ █   █ ▀▄▄▄▀   ▐▌  ▐▛▀▚▖▝▚▄▄▖     ▄▄▄▀ ");
+	fmt.Println("▝▚▄▄▖▐▌ ▐▌                        ▐▌  ▐▌ ▐▌               ");
+	fmt.Println("                                  ▐▌                      ");
+	fmt.Printf("Version: %s\nGit Commit: %s\nBuild Time: %s\n", Version, CommitSHA, BuildTime)
+	
 	if *debug {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 		log.Println("Debug logging enabled")
@@ -69,7 +85,8 @@ func main() {
 	proxy.DebugMode = *debug
 
 	p := proxy.NewChronoProxy()
-	log.Printf("🚀 Chronotheus proxy listening on %s", *listen)
+	log.Printf("🚀 Chronotheus v%s (commit %s) launching!\n", Version, CommitSHA)
+	log.Printf("👂 Listening on %s", *listen)
 	if err := http.ListenAndServe(*listen, p); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
