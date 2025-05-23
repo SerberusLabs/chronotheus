@@ -386,7 +386,7 @@ func fetchWindowsRange(p *ChronoProxy, params url.Values, endpoint, command stri
 
 	}
 	if DebugMode {
-		log.Printf("fetchWindowsRange offset loop completed: ", len(all))
+		log.Printf("fetchWindowsRange offset loop completed (total %d): ", len(all))
 	}
 	return all
 }
