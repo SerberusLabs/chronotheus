@@ -42,6 +42,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/andydixon/chronotheus/internal/plugin"
 	"github.com/andydixon/chronotheus/proxy"
 )
 
@@ -51,6 +52,9 @@ var (
 	CommitSHA = "unknown"
 	BuildTime = "unknown"
 )
+
+// Global plugin manager instance
+var GlobalPluginManager *plugin.Manager
 
 // main is our entrypoint
 //
@@ -70,11 +74,7 @@ func main() {
 
 	flag.Parse()
 
-	fmt.Println("▗▄▄▖▐▌    ▄▄▄ ▄▄▄  ▄▄▄▄   ▄▄▄     ■  ▐▌   ▗▞▀▚▖█  ▐▌ ▄▄▄ ");
-	fmt.Println("▐▌   ▐▌   █   █   █ █   █ █   █ ▗▄▟▙▄▖▐▌   ▐▛▀▀▘▀▄▄▞▘▀▄▄  ");
-	fmt.Println("▐▌   ▐▛▀▚▖█   ▀▄▄▄▀ █   █ ▀▄▄▄▀   ▐▌  ▐▛▀▚▖▝▚▄▄▖     ▄▄▄▀ ");
-	fmt.Println("▝▚▄▄▖▐▌ ▐▌                        ▐▌  ▐▌ ▐▌               ");
-	fmt.Println("                                  ▐▌                      ");
+	fmt.Println("-={[ C h r o n e t h e u s ]}=-");
 	fmt.Printf("Version: %s\nGit Commit: %s\nBuild Time: %s\n", Version, CommitSHA, BuildTime)
 	
 	if *debug {
@@ -83,6 +83,13 @@ func main() {
 	}
 
 	proxy.DebugMode = *debug
+
+	pluginPath := "./plugins"
+	GlobalPluginManager = plugin.NewManager(pluginPath)
+	
+	if err := plugin.WatchPlugins(GlobalPluginManager); err != nil {
+		log.Printf("Failed to initialize plugin watcher: %v", err)
+	}
 
 	p := proxy.NewChronoProxy()
 	log.Printf("🚀 Chronotheus v%s (commit %s) launching!\n", Version, CommitSHA)

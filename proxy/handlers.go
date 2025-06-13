@@ -25,6 +25,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/andydixon/chronotheus/internal/plugin" // Add this import
 )
 
 // Welcome to the handler functions!! WOOOOOOO
@@ -59,6 +61,12 @@ func (p *ChronoProxy) handleQuery(w http.ResponseWriter, r *http.Request, upstre
 
     params := parseClientParams(r)
     remapMatch(params)
+
+    // Extract _plugin label value from params
+    requestedPlugin := params.Get("query")
+    if matches := pluginLabelRegex.FindStringSubmatch(requestedPlugin); len(matches) > 1 {
+        requestedPlugin = matches[1]
+    }
 
     requestedTf, command := extractSelectors(params)
     stripLabelFromParam(params, "query", "chrono_timeframe")
@@ -128,6 +136,15 @@ func (p *ChronoProxy) handleQuery(w http.ResponseWriter, r *http.Request, upstre
         merged = filterByTimeframe(merged, requestedTf)
     }
 
+    // Process through plugins before writing
+    if plugin.GlobalPluginManager != nil {
+        var err error
+        merged, err = plugin.GlobalPluginManager.ProcessPlugins(merged, requestedPlugin)
+        if err != nil {
+            log.Printf("[ERROR] Plugin processing error in handleQuery: %v", err)
+        }
+    }
+
     writeJSON(w, "vector", merged)
     if DebugMode {
         log.Printf("[DEBUG] handleQuery written to requester: %d series returned", len(merged))
@@ -150,6 +167,12 @@ func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, u
     params := parseClientParams(r)
     remapMatch(params)
 
+    // Extract _plugin label value from params
+    requestedPlugin := params.Get("query")
+    if matches := pluginLabelRegex.FindStringSubmatch(requestedPlugin); len(matches) > 1 {
+        requestedPlugin = matches[1]
+    }
+
     requestedTf, command := extractSelectors(params)
     
     if DebugMode {
@@ -158,6 +181,8 @@ func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, u
 
     stripLabelFromParam(params, "query", "chrono_timeframe")
     stripLabelFromParam(params, "query", "command")
+    stripLabelFromParam(params, "query", "_plugin")
+    
     if params.Get("step") == "" {
         params.Set("step", "60")
     }
@@ -226,6 +251,15 @@ func (p *ChronoProxy) handleQueryRange(w http.ResponseWriter, r *http.Request, u
         merged = filterByTimeframe(merged, requestedTf)
     }
 
+    // Process through plugins before writing
+    if plugin.GlobalPluginManager != nil {
+        var err error
+        merged, err = plugin.GlobalPluginManager.ProcessPlugins(merged, requestedPlugin)
+        if err != nil {
+            log.Printf("[ERROR] Plugin processing error in handleQuery: %v", err)
+        }
+    }
+
     writeJSON(w, "matrix", merged)
     if DebugMode {
         log.Printf("[DEBUG] handleQueryRange written to requester: %d series returned", len(merged))
@@ -273,6 +307,9 @@ func (p *ChronoProxy) handleLabels(w http.ResponseWriter, r *http.Request, upstr
     if !containsString(data, "_command") {
         data = append(data, "_command")
     }
+    if !containsString(data, pluginLabelName) {
+        data = append(data, pluginLabelName)
+    }
     out["data"] = data
 
     w.Header().Set("Content-Type", "application/json")
@@ -286,6 +323,8 @@ func (p *ChronoProxy) handleLabels(w http.ResponseWriter, r *http.Request, upstr
 var (
     labelValuesCache    = make(map[string]labelValuesCacheEntry)
     labelValuesCacheMux sync.RWMutex
+    pluginLabelName     = "_plugin"  // Constant for plugin label name
+    pluginLabelRegex    = regexp.MustCompile(`_plugin="([^"]+)"`) // Added pluginLabelRegex
 )
 
 type labelValuesCacheEntry struct {
@@ -301,6 +340,7 @@ const labelValuesCacheTTL = 5 * time.Minute
 // Special cases:
 // - chrono_timeframe: Returns all our time windows (raw + synthetic)
 // - _command: Returns our magic commands (like DONT_REMOVE_UNUSED_HISTORICS)
+// - _plugin: Returns all loaded plugin IDs
 // - anything else: Passes through to the upstream Prometheus
 //
 // Pro tip: This is how Grafana knows what values to show in dropdowns! 
@@ -321,6 +361,13 @@ func (p *ChronoProxy) handleLabelValues(w http.ResponseWriter, r *http.Request, 
         writeJSONRaw(w, map[string]interface{}{
             "status": "success",
             "data":   []string{"", "DONT_REMOVE_UNUSED_HISTORICS"},
+        })
+        return
+    case pluginLabelName:
+        // Return list of loaded plugin IDs
+        writeJSONRaw(w, map[string]interface{}{
+            "status": "success",
+            "data":   plugin.LoadedPlugins,
         })
         return
     }
